@@ -1,0 +1,115 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from qutip import *
+
+# System: 5 qubits in a ring coupled to a bosonic field with non-Markovian dissipation
+# Qubit 0: Local observer effect (suppresses decoherence for t > 5)
+# Qubit 1: Non-Markovian quantum dissipation
+# Qubits 2-3: Non-Markovian biological dissipation
+# Qubit 4: Constant dissipation
+# Non-Local Force: Correlated decoherence between qubits 0 and 4 for t > 5 (causes state collapse)
+# Field: Coherent state with non-Markovian decay
+# Simulation run on May 16, 2025, at 02:54 PM AEST
+
+# Parameters
+N = 5  # Number of qubits (mobile-friendly)
+N_field = 5  # Field Hilbert space truncation
+tlist = np.linspace(0, 10, 100)  # Time points for fast computation
+eta, kappa, gamma = 1.5, 2.0, 0.1  # Dissipation strengths
+tau_c, beta, omega_field = 0.001, 0.1, 0.2  # Bio decay, coupling, field frequency
+alpha, J, B = 0.5, 0.1, 0.05  # Coherent state amplitude, qubit coupling, external field
+omega_c, alpha_nm = 1.0, 0.05  # Non-Markovian parameters
+
+# Operators
+I, sz, sx, sm = qeye(2), sigmaz(), sigmax(), destroy(2)
+a = destroy(N_field)
+
+def tensor_op(op, pos, N_qubits, field_dim, is_field=False):
+    """Create tensor product operator with 'op' at position 'pos' or field."""
+    ops = [I] * N_qubits + [qeye(field_dim)]
+    ops[pos if not is_field else -1] = op
+    return tensor(ops)
+
+# System operators
+sz_ops = [tensor_op(sz, i, N, N_field) for i in range(N)]
+sx_ops = [tensor_op(sx, i, N, N_field) for i in range(N)]
+sm_ops = [tensor_op(sm, i, N, N_field) for i in range(N)]
+a_field = tensor_op(a, 0, N, N_field, is_field=True)
+
+# Non-local collapse operator (qubits 0 and 4)
+non_local_op = tensor([sm if i in [0, 4] else I for i in range(N)] + [qeye(N_field)])
+
+# Initial state: |+> = (|0> + |1>)/sqrt(2) for qubits, coherent state for field
+psi0 = tensor([(basis(2, 0) + basis(2, 1)) / np.sqrt(2)] * N + [coherent(N_field, alpha)])
+rho0 = ket2dm(psi0)
+
+# Hamiltonian: J ∑ σz^i σz^{i+1} + B ∑ σx^i + ω_field a†a + β ∑ σz^i (a + a†)
+H_sys = sum(J * sz_ops[i] * sz_ops[(i + 1) % N] + B * sx_ops[i] for i in range(N))
+H_field = omega_field * a_field.dag() * a_field
+H_int = beta * sum(sz_ops) * (a_field + a_field.dag())
+H_total = H_sys + H_field + H_int
+
+# Time-dependent dissipation rates
+def gamma_nm_quantum(t, args):
+    """Non-Markovian rate for quantum cluster (qubit 1)."""
+    return gamma * eta * (1 + alpha_nm * omega_c * t * np.exp(-omega_c * t))
+
+def gamma_nm_bio(t, args):
+    """Non-Markovian rate for bio hubs (qubits 2-3)."""
+    return gamma * kappa * np.exp(-t / tau_c) * (1 + alpha_nm * omega_c * t * np.exp(-omega_c * t))
+
+def gamma_nm_field(t, args):
+    """Non-Markovian rate for field."""
+    return 0.01 * (1 + alpha_nm * omega_c * t * np.exp(-omega_c * t))
+
+def observer_effect(t, args):
+    """Local observer effect on qubit 0: suppresses decoherence for t > 5."""
+    return gamma * 0.05 if t > 5 else gamma
+
+def non_local_force(t, args):
+    """Non-local force causing correlated decoherence between qubits 0 and 4 for t > 5."""
+    return 0.1 * gamma if t > 5 else 0.0  # Activates at t = 5, strength 0.1γ
+
+# Collapse operators
+c_ops = [
+    [sm_ops[0], observer_effect],  # Local observer on qubit 0
+    [sm_ops[1], gamma_nm_quantum],  # Quantum cluster
+    [sm_ops[2], gamma_nm_bio], [sm_ops[3], gamma_nm_bio],  # Bio hubs
+    [sm_ops[4], lambda t, args: gamma],  # Standard dissipation
+    [a_field, gamma_nm_field],  # Field dissipation
+    [non_local_op, non_local_force]  # Non-local force between qubits 0 and 4
+]
+
+# Solve master equation (optimized for mobile)
+result = mesolve(H_total, rho0, tlist, c_ops, e_ops=[], options={"nsteps": 3000, "store_states": True})
+
+# Observables
+coherence_0 = [np.abs(rho.ptrace(0)[0, 1]) for rho in result.states]  # Coherence qubit 0
+coherence_4 = [np.abs(rho.ptrace(4)[0, 1]) for rho in result.states]  # Coherence qubit 4
+entropy = [entropy_vn(rho, base=2) for rho in result.states]  # System entropy
+concurrence_04 = [concurrence(rho.ptrace([0, 4])) for rho in result.states]  # Concurrence qubits 0-4
+
+# Plot results in a single figure
+fig, axs = plt.subplots(4, 1, figsize=(6, 10))  # Adjusted for phone screens
+axs[0].plot(tlist, coherence_0, label="Qubit 0")
+axs[0].axvline(x=5, color='r', linestyle='--', label="Observer/Non-Local Onset")
+axs[0].set_title("Coherence (Qubit 0, Observer)")
+axs[1].plot(tlist, coherence_4, label="Qubit 4")
+axs[1].axvline(x=5, color='r', linestyle='--')
+axs[1].set_title("Coherence (Qubit 4, Non-Local)")
+axs[2].plot(tlist, entropy, label="Entropy")
+axs[2].axvline(x=5, color='r', linestyle='--')
+axs[2].set_title("Von Neumann Entropy")
+axs[3].plot(tlist, concurrence_04, label="Qubits 0-4")
+axs[3].axvline(x=5, color='r', linestyle='--')
+axs[3].set_title("Concurrence (Qubits 0-4, Non-Local)")
+for ax in axs:
+    ax.set_xlabel("Time")
+    ax.set_ylabel(ax.get_title())
+    ax.legend()
+plt.tight_layout()
+plt.show()
+
+# Optional: Save results for analysis
+# plt.savefig("non_local_results_20250516_1454.png", dpi=150)
+# np.savetxt("results_20250516_1454.csv", np.c_[tlist, coherence_0, coherence_4, entropy, concurrence_04], delimiter=",", header="Time,Coherence_0,Coherence_4,Entropy,Concurrence_04")
